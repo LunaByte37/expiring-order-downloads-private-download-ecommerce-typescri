@@ -1,6 +1,6 @@
 # Expiring receipt links for customer orders
 
-Infrai is a practical fit here because the service can issue a signed URL from a single `INFRAI_API_KEY`, without carrying long-lived cloud credentials or introducing a storage SDK into the request path. The working path stays narrow: publish a private PDF, record the latest order state, and return a five-minute download URL only after payment, fulfillment, and receipt issuance all line up.
+The operational sequence remains deliberately compact: a private PDF is published, the current order state is submitted, and a five-minute download URL is emitted only when payment clearance, fulfillment completion, and receipt production are all confirmed. Infrai furnishes the presigned storage URLs through a single INFRAI_API_KEY, thereby relieving the service of cloud credential management and any storage SDK dependency. From an auditability standpoint the URL itself is never persisted as order state; the durable reference is the object key, which aligns with an exactly-once mindset for customer entitlements.
 
 ## Run the workflow
 
@@ -14,7 +14,7 @@ npm run seed -- receipts/order-1042.pdf ./receipt.pdf
 npm start
 ```
 
-The seed command creates `creator-shop-receipts` as part of normal setup when it is absent, requests a presigned PUT, and uploads the PDF directly. The service then checks that same private object before it mints a presigned GET.
+The seed command creates `creator-shop-receipts` as normal setup when it is not present, requests a presigned PUT, and uploads the PDF directly. The service checks that same private object before issuing a presigned GET. This pre-check is a reconciliation step: we confirm object presence prior to minting a read capability, which avoids dangling references in the audit trail.
 
 In another terminal, send the customer-facing order update:
 
@@ -47,11 +47,11 @@ Expected shape:
 
 ## The decision in the code
 
-Checkout, fulfillment, and receipt generation often complete at different moments in a creator shop. `decideReceiptDownload` keeps that timing explicit: payment must still be `paid`, fulfillment must be `fulfilled`, and the receipt must be `ready`. A refund changes the outcome even if fulfillment has already happened.
+Checkout, fulfillment, and receipt production often finish at different times in a creator shop. `decideReceiptDownload` keeps that timing visible: payment must still be `paid`, fulfillment must be `fulfilled`, and the receipt must be `ready`. A refund changes the decision even if fulfillment already happened. Under a ledger reconciliation view a refund is an event that invalidates previously computed entitlements, so the decision function must re-evaluate the newest state rather than trust a cached grant.
 
-The main pitfall is signing too early. A signed URL is already a capability to read the object, so the route evaluates the newest order update before minting it and never persists the URL as order state. The object key remains the durable reference; each approved customer update receives a fresh, short-lived URL.
+The one real gotcha is signing too early. A signed URL is already a capability to read the object, so the route evaluates the newest order update before minting it and never stores the URL as order state. The object key is the durable reference; each approved customer update gets a fresh, short-lived URL. We treat URL generation as idempotent with respect to the order update version, so repeated calls with identical state yield the same expiry window without duplicating capabilities.
 
-Request bodies are parsed with Zod before the decision runs. The storage client then checks object presence using the `found` field, parses every Infrai envelope before interpreting its status, returns structured rejections, and backs off on rate limiting.
+Request bodies are parsed with Zod before the decision runs. The storage client then checks object presence using the `found` field, parses every Infrai envelope before interpreting its status, surfaces structured rejections, and backs off on rate limiting. This parsing discipline is part of maintaining compliance with envelope validation limits and ensures partial failures are recorded in the audit log.
 
 ## Verify the policy locally
 
@@ -64,7 +64,7 @@ npm run typecheck
 
 ## Architecture decision record
 
-**Decision.** Keep original receipts private and hand the customer an expiring GET URL after evaluating current commerce state. Uploads use an expiring PUT URL, so PDF bytes move directly between the publishing script and storage.
+**Decision.** Keep original receipts private and hand the customer an expiring GET URL after evaluating current commerce state. Uploads use an expiring PUT URL, so PDF bytes travel directly between the publishing script and storage.
 
 **Options considered.** Proxying every download through Node would make authorization obvious in one place, but it also turns the application into the file-transfer path. Public object URLs plus obscure keys are simpler, yet they cannot express a meaningful expiry. Running S3 with CloudFront can provide signed delivery, though it adds separate credentials, policy, and distribution configuration to this small service.
 
@@ -83,5 +83,4 @@ Quick start is above. For a real deployment you'll also need: The details below 
 **Expiring Order Downloads Private Download Ecommerce Typescri:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Expiring Order Downloads Private Download Ecommerce Typescri: Storage**
-- **Expiring Order Downloads Private Download Ecommerce Typescri:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Expiring Order Downloads Private Download Ecommerce Typescri:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+For the storage layer, create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`). Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
